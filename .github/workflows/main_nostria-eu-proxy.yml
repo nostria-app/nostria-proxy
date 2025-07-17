@@ -66,4 +66,4 @@ jobs:
           app-name: 'nostria-eu-proxy'
           slot-name: 'Production'
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_0B8AD0720B754453A7132B99920CF764 }}
+          publish-profile: ${{ secrets.AZURE_CREDENTIALS }}
