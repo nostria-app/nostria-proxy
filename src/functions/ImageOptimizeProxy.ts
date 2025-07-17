@@ -14,13 +14,18 @@ export async function ImageOptimizeProxy(request: HttpRequest, context: Invocati
         return { status: 400, body: "Missing 'url' query parameter." };
     }
 
+    // Limit width and height to maximum 1024 pixels
+    const maxDimension = 1024;
+    const width = w ? Math.min(parseInt(w), maxDimension) : undefined;
+    const height = h ? Math.min(parseInt(h), maxDimension) : undefined;
+
     try {
         const response = await axios.get(url, { responseType: "arraybuffer" });
 
         const buffer = await sharp(response.data)
             .resize({
-                width: w ? parseInt(w) : undefined,
-                height: h ? parseInt(h) : undefined,
+                width: width,
+                height: height,
                 fit: "cover"
             })
             .toFormat(format as keyof sharp.FormatEnum, { quality: parseInt(quality.toString()) })
