@@ -72,6 +72,11 @@ jobs:
       - name: Unzip artifact for deployment
         run: unzip release.zip
       
+      - name: Log in to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
       - name: 'Run Azure Functions Action for ${{ matrix.app-name }}'
         uses: Azure/functions-action@v1
         id: fa
@@ -79,4 +84,4 @@ jobs:
           app-name: ${{ matrix.app-name }}
           slot-name: 'Production'
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
-          publish-profile: ${{ secrets[matrix.secret-name] }}
+          # publish-profile: ${{ secrets[matrix.secret-name] }}
