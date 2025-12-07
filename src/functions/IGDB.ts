@@ -9,6 +9,68 @@ interface TokenCache {
 
 let tokenCache: TokenCache | null = null;
 
+// Response cache for IGDB API responses
+interface CacheEntry {
+    data: any;
+    expiresAt: number;
+}
+
+const responseCache: Map<string, CacheEntry> = new Map();
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const MAX_CACHE_SIZE = 1000; // Maximum number of cached entries
+
+/**
+ * Get cached response or null if not found/expired
+ */
+function getCachedResponse(cacheKey: string): any | null {
+    const entry = responseCache.get(cacheKey);
+    if (!entry) {
+        return null;
+    }
+    
+    if (Date.now() > entry.expiresAt) {
+        responseCache.delete(cacheKey);
+        return null;
+    }
+    
+    return entry.data;
+}
+
+/**
+ * Store response in cache
+ */
+function setCachedResponse(cacheKey: string, data: any): void {
+    // Simple cache eviction: remove oldest entries if cache is full
+    if (responseCache.size >= MAX_CACHE_SIZE) {
+        const keysToDelete: string[] = [];
+        const now = Date.now();
+        
+        // First, remove expired entries
+        for (const [key, entry] of responseCache) {
+            if (now > entry.expiresAt) {
+                keysToDelete.push(key);
+            }
+        }
+        
+        // If still too many, remove oldest 10%
+        if (responseCache.size - keysToDelete.length >= MAX_CACHE_SIZE) {
+            const iterator = responseCache.keys();
+            const toRemove = Math.ceil(MAX_CACHE_SIZE * 0.1);
+            for (let i = 0; i < toRemove; i++) {
+                const key = iterator.next().value;
+                if (key) keysToDelete.push(key);
+            }
+        }
+        
+        keysToDelete.forEach(key => responseCache.delete(key));
+    }
+    
+    responseCache.set(cacheKey, {
+        data,
+        expiresAt: Date.now() + CACHE_TTL_MS
+    });
+}
+
 /**
  * Get or refresh the IGDB access token using Twitch OAuth2
  */
@@ -413,6 +475,26 @@ export async function IGDB(request: HttpRequest, context: InvocationContext): Pr
     try {
         const action = request.query.get("action") || "search";
         const limit = Math.min(parseInt(request.query.get("limit") || "10"), 50);
+        
+        // Build cache key from request parameters
+        const cacheKey = buildCacheKey(action, request, limit);
+        
+        // Check cache first
+        const cachedResult = getCachedResponse(cacheKey);
+        if (cachedResult) {
+            context.log(`Cache hit for key: ${cacheKey}`);
+            return {
+                status: 200,
+                headers: {
+                    "Content-Type": "application/json",
+                    "Cache-Control": "public, max-age=300", // 5 minutes
+                    "X-Cache": "HIT"
+                },
+                jsonBody: cachedResult
+            };
+        }
+        
+        context.log(`Cache miss for key: ${cacheKey}`);
 
         // Fields to request - comprehensive for streaming use case
         const gameFields = `
@@ -588,11 +670,15 @@ export async function IGDB(request: HttpRequest, context: InvocationContext): Pr
                 };
         }
 
+        // Cache the successful result
+        setCachedResponse(cacheKey, result);
+
         return {
             status: 200,
             headers: {
                 "Content-Type": "application/json",
-                "Cache-Control": "public, max-age=3600" // 1 hour cache
+                "Cache-Control": "public, max-age=300", // 5 minutes
+                "X-Cache": "MISS"
             },
             jsonBody: result
         };
@@ -617,6 +703,32 @@ export async function IGDB(request: HttpRequest, context: InvocationContext): Pr
                 message: error.message
             }
         };
+    }
+}
+
+/**
+ * Build a cache key from request parameters
+ */
+function buildCacheKey(action: string, request: HttpRequest, limit: number): string {
+    switch (action) {
+        case "search":
+            const query = request.query.get("q") || request.query.get("query") || "";
+            return `search:${query.toLowerCase()}:${limit}`;
+        case "get":
+            return `get:${request.query.get("id")}`;
+        case "slug":
+            return `slug:${request.query.get("slug")?.toLowerCase()}`;
+        case "popular":
+            return `popular:${limit}`;
+        case "recent":
+            // Round to 5-minute intervals for recent/upcoming to improve cache hits
+            const recentInterval = Math.floor(Date.now() / (5 * 60 * 1000));
+            return `recent:${limit}:${recentInterval}`;
+        case "upcoming":
+            const upcomingInterval = Math.floor(Date.now() / (5 * 60 * 1000));
+            return `upcoming:${limit}:${upcomingInterval}`;
+        default:
+            return `unknown:${action}`;
     }
 }
 
