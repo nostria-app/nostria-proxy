@@ -32,13 +32,31 @@ jobs:
         shell: bash
         run: |
           pushd './${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}'
-          npm install
+          npm ci
           npm run build --if-present
           npm run test --if-present
+          # Prune dev dependencies for smaller deployment
+          npm prune --production
           popd
 
       - name: Zip artifact for deployment
-        run: zip release.zip ./* -r
+        run: |
+          zip -r release.zip . \
+            -x "*.git*" \
+            -x "*.vscode/*" \
+            -x "*.github/*" \
+            -x "*src/*" \
+            -x "*.ts" \
+            -x "*.js.map" \
+            -x "*local.settings.json" \
+            -x "*tsconfig.json" \
+            -x "*__azurite*" \
+            -x "*__blobstorage__/*" \
+            -x "*__queuestorage__/*" \
+            -x "*node_modules/typescript/*" \
+            -x "*node_modules/azure-functions-core-tools/*" \
+            -x "*node_modules/@types/*" \
+            -x "*node_modules/rimraf/*"
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
