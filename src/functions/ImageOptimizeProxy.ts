@@ -111,7 +111,6 @@ export async function ImageOptimizeProxy(request: HttpRequest, context: Invocati
         // Check cache first
         const cachedBuffer = await getCachedImage(cacheKey, format);
         if (cachedBuffer) {
-            context.log(`Cache hit for ${cacheKey}`);
             return {
                 status: 200,
                 headers: {
@@ -122,8 +121,6 @@ export async function ImageOptimizeProxy(request: HttpRequest, context: Invocati
                 body: cachedBuffer
             };
         }
-
-        context.log(`Cache miss for ${cacheKey}, fetching from source`);
         const response = await axios.get(url, { responseType: "arraybuffer" });
 
         const buffer = await sharp(response.data)
@@ -135,10 +132,8 @@ export async function ImageOptimizeProxy(request: HttpRequest, context: Invocati
             .toFormat(format as keyof sharp.FormatEnum, { quality: quality })
             .toBuffer();
 
-        // Cache the processed image (don't await to speed up response)
-        cacheImage(cacheKey, format, buffer).catch(err => 
-            context.log(`Failed to cache image: ${err}`)
-        );
+        // Cache the processed image (await to ensure it completes before function exits)
+        await cacheImage(cacheKey, format, buffer);
 
         return {
             status: 200,
