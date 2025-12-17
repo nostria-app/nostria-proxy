@@ -9,26 +9,35 @@ const BROWSER_CACHE_MAX_AGE = 604800; // 7 days in seconds
 const BLOB_CACHE_MAX_AGE_MS = 86400000; // 1 day in milliseconds
 
 let containerClient: ContainerClient | null = null;
+let containerInitialized = false;
 
-async function getContainerClient(): Promise<ContainerClient> {
-    if (containerClient) {
+async function getContainerClient(context?: InvocationContext): Promise<ContainerClient> {
+    if (containerClient && containerInitialized) {
         return containerClient;
     }
 
     const connectionString = process.env.AzureWebJobsStorage;
     if (!connectionString) {
+        context?.error("AzureWebJobsStorage connection string not configured");
         throw new Error("AzureWebJobsStorage connection string not configured");
     }
 
-    const blobServiceClient = BlobServiceClient.fromConnectionString(connectionString);
-    containerClient = blobServiceClient.getContainerClient(CONTAINER_NAME);
-    
-    // Create container if it doesn't exist
-    await containerClient.createIfNotExists({
-        access: "blob" // Allow public read access to blobs
-    });
+    try {
+        const blobServiceClient = BlobServiceClient.fromConnectionString(connectionString);
+        const client = blobServiceClient.getContainerClient(CONTAINER_NAME);
+        
+        // Create container if it doesn't exist (private access - no public blob access)
+        await client.createIfNotExists();
+        
+        // Only set the cached client after successful initialization
+        containerClient = client;
+        containerInitialized = true;
 
-    return containerClient;
+        return containerClient;
+    } catch (err) {
+        context?.error(`Failed to create container client: ${err}`);
+        throw err;
+    }
 }
 
 function generateCacheKey(url: string, width?: number, height?: number, format?: string, quality?: number): string {
@@ -37,9 +46,9 @@ function generateCacheKey(url: string, width?: number, height?: number, format?:
     return hash.digest("hex");
 }
 
-async function getCachedImage(cacheKey: string, format: string): Promise<Buffer | null> {
+async function getCachedImage(cacheKey: string, format: string, context?: InvocationContext): Promise<Buffer | null> {
     try {
-        const container = await getContainerClient();
+        const container = await getContainerClient(context);
         const blobName = `${cacheKey}.${format}`;
         const blobClient = container.getBlobClient(blobName);
         
@@ -65,14 +74,15 @@ async function getCachedImage(cacheKey: string, format: string): Promise<Buffer 
         }
         
         return Buffer.concat(chunks);
-    } catch {
+    } catch (err) {
+        context?.error(`Failed to get cached image: ${err}`);
         return null;
     }
 }
 
-async function cacheImage(cacheKey: string, format: string, buffer: Buffer): Promise<void> {
+async function cacheImage(cacheKey: string, format: string, buffer: Buffer, context?: InvocationContext): Promise<void> {
     try {
-        const container = await getContainerClient();
+        const container = await getContainerClient(context);
         const blobName = `${cacheKey}.${format}`;
         const blockBlobClient = container.getBlockBlobClient(blobName);
         
@@ -82,8 +92,8 @@ async function cacheImage(cacheKey: string, format: string, buffer: Buffer): Pro
                 blobCacheControl: `public, max-age=${BROWSER_CACHE_MAX_AGE}`
             }
         });
-    } catch {
-        // Silently fail caching - we can still return the processed image
+    } catch (err) {
+        context?.error(`Failed to cache image: ${err}`);
     }
 }
 
@@ -109,7 +119,7 @@ export async function ImageOptimizeProxy(request: HttpRequest, context: Invocati
 
     try {
         // Check cache first
-        const cachedBuffer = await getCachedImage(cacheKey, format);
+        const cachedBuffer = await getCachedImage(cacheKey, format, context);
         if (cachedBuffer) {
             return {
                 status: 200,
@@ -133,7 +143,7 @@ export async function ImageOptimizeProxy(request: HttpRequest, context: Invocati
             .toBuffer();
 
         // Cache the processed image (await to ensure it completes before function exits)
-        await cacheImage(cacheKey, format, buffer);
+        await cacheImage(cacheKey, format, buffer, context);
 
         return {
             status: 200,
