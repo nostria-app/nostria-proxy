@@ -15,6 +15,44 @@ const ALLOWED_CONTENT_TYPES = [
 const REQUEST_TIMEOUT = 15000; // 15 seconds
 const MAX_RESPONSE_SIZE = 10 * 1024 * 1024; // 10MB limit
 
+function isMediumUrl(url: URL): boolean {
+    const hostname = url.hostname.toLowerCase();
+    return hostname === "medium.com" || hostname.endsWith(".medium.com");
+}
+
+function buildProxyRequestHeaders(request: HttpRequest, targetUrl: URL): Record<string, string> {
+    const browserLikeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+
+    return {
+        "Accept": request.headers.get("accept") || "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": request.headers.get("accept-language") || "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Upgrade-Insecure-Requests": "1",
+        "Referer": `${targetUrl.protocol}//${targetUrl.hostname}/`,
+        "User-Agent": browserLikeUserAgent
+    };
+}
+
+async function tryMediumOEmbedFallback(targetUrl: string, context: InvocationContext): Promise<{ title: string; author_name?: string; thumbnail_url?: string; provider_name?: string; provider_url?: string; } | null> {
+    try {
+        const oEmbedResponse = await axios.get("https://medium.com/oembed", {
+            timeout: REQUEST_TIMEOUT,
+            params: { url: targetUrl },
+            validateStatus: (status) => status >= 200 && status < 300,
+            headers: {
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            }
+        });
+
+        return oEmbedResponse.data;
+    } catch (fallbackError) {
+        context.warn(`Medium oEmbed fallback failed for ${targetUrl}: ${fallbackError}`);
+        return null;
+    }
+}
+
 /**
  * CORS Proxy function for fetching RSS feeds and other resources that block CORS.
  * 
@@ -99,16 +137,49 @@ export async function CorsProxy(request: HttpRequest, context: InvocationContext
             timeout: REQUEST_TIMEOUT,
             maxContentLength: MAX_RESPONSE_SIZE,
             responseType: "arraybuffer",
-            headers: {
-                // Pass through common headers that might be needed
-                "Accept": request.headers.get("accept") || "*/*",
-                "Accept-Language": request.headers.get("accept-language") || "en-US,en;q=0.9",
-                "User-Agent": "Nostria-Proxy/1.0 (RSS Feed Fetcher)"
-            },
+            headers: buildProxyRequestHeaders(request, parsedUrl),
             // Follow redirects
             maxRedirects: 5,
             validateStatus: (status) => status < 500 // Accept any status below 500
         });
+
+        if (response.status === 403 && isMediumUrl(parsedUrl)) {
+            context.warn(`Medium returned 403 for ${targetUrl}, trying oEmbed fallback`);
+            const oEmbedData = await tryMediumOEmbedFallback(targetUrl, context);
+
+            if (oEmbedData?.title) {
+                const fallbackTitle = oEmbedData.title;
+                const fallbackImage = oEmbedData.thumbnail_url || "";
+                const fallbackSite = oEmbedData.provider_name || "Medium";
+                const escapedTitle = fallbackTitle.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;");
+                const escapedSite = fallbackSite.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;");
+                const escapedUrl = targetUrl.replace(/&/g, "&amp;").replace(/\"/g, "&quot;");
+                const escapedImage = fallbackImage.replace(/&/g, "&amp;").replace(/\"/g, "&quot;");
+
+                const fallbackHtml = [
+                    "<!doctype html>",
+                    "<html><head>",
+                    `<meta property=\"og:title\" content=\"${escapedTitle}\"/>`,
+                    `<meta property=\"og:url\" content=\"${escapedUrl}\"/>`,
+                    `<meta property=\"og:site_name\" content=\"${escapedSite}\"/>`,
+                    fallbackImage ? `<meta property=\"og:image\" content=\"${escapedImage}\"/>` : "",
+                    "</head><body></body></html>"
+                ].join("");
+
+                return {
+                    status: 200,
+                    headers: {
+                        ...corsHeaders,
+                        "Content-Type": "text/html; charset=utf-8",
+                        "Cache-Control": "public, max-age=300",
+                        "X-Proxied-URL": targetUrl,
+                        "X-Original-Status": "403",
+                        "X-Fallback": "medium-oembed"
+                    },
+                    body: fallbackHtml
+                };
+            }
+        }
 
         // Get content type from response
         const contentType = response.headers["content-type"] || "application/octet-stream";
